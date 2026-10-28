@@ -35,12 +35,14 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/component-base/metrics/testutil"
 	"k8s.io/klog/v2/ktesting"
 	"k8s.io/utils/ptr"
 
 	_ "k8s.io/kubernetes/pkg/apis/batch/install"
 	_ "k8s.io/kubernetes/pkg/apis/core/install"
 	"k8s.io/kubernetes/pkg/controller"
+	"k8s.io/kubernetes/pkg/controller/cronjob/metrics"
 )
 
 var (
@@ -1895,5 +1897,56 @@ func TestControllerV2JobAlreadyExistsButDifferentOwner(t *testing.T) {
 	}
 	if jobControl.GetJobNamespace[0] != cj.Namespace {
 		t.Fatalf("Unexpected job's namespace, got: %s, expected %s", jobControl.GetJobNamespace[0], cj.Namespace)
+	}
+}
+
+func TestControllerV2SyncOutcomeMetric(t *testing.T) {
+	testCases := map[string]struct {
+		suspend    bool
+		wantResult string
+	}{
+		"suspended cronjob completes the sync": {
+			suspend:    true,
+			wantResult: metrics.SyncResultDone,
+		},
+		"active cronjob is requeued for its next schedule": {
+			suspend:    false,
+			wantResult: metrics.SyncResultRequeue,
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			_, ctx := ktesting.NewTestContext(t)
+
+			cj := cronJob()
+			cj.Spec.Suspend = ptr.To(tc.suspend)
+			cj.Spec.Schedule = onTheHour
+			cjCopy := cj.DeepCopy()
+
+			client := fake.NewSimpleClientset(cjCopy)
+			informerFactory := informers.NewSharedInformerFactory(client, controller.NoResyncPeriodFunc())
+			_ = informerFactory.Batch().V1().CronJobs().Informer().GetIndexer().Add(cjCopy)
+
+			jm, err := NewControllerV2(ctx, informerFactory.Batch().V1().Jobs(), informerFactory.Batch().V1().CronJobs(), client)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			jm.jobControl = &fakeJobControl{}
+			jm.cronJobControl = &fakeCJControl{CronJob: cjCopy}
+			jm.now = justBeforeTheHour
+			metrics.CronJobSyncTotal.Reset()
+
+			key, _ := controller.KeyFunc(cjCopy)
+			jm.queue.Add(key)
+			jm.processNextWorkItem(ctx)
+
+			got, err := testutil.GetCounterMetricValue(metrics.CronJobSyncTotal.WithLabelValues(tc.wantResult))
+			if err != nil {
+				t.Fatalf("unable to read sync_total metric: %v", err)
+			}
+			if got != 1 {
+				t.Errorf("expected sync_total{result=%q} to be 1, got %v", tc.wantResult, got)
+			}
+		})
 	}
 }
