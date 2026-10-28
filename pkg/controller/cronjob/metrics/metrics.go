@@ -35,6 +35,28 @@ var (
 			Buckets:        metrics.ExponentialBuckets(1, 2, 10),
 		},
 	)
+
+	// CronJobSyncTotal counts the CronJob syncs processed by the controller,
+	// partitioned by the outcome of the sync.
+	CronJobSyncTotal = metrics.NewCounterVec(
+		&metrics.CounterOpts{
+			Subsystem:      CronJobControllerSubsystem,
+			Name:           "sync_total",
+			Help:           "Number of CronJob syncs processed by the controller, by result",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"result"},
+	)
+)
+
+// Possible values for the "result" label of CronJobSyncTotal.
+const (
+	// SyncResultError means the sync failed and the CronJob was requeued with backoff.
+	SyncResultError = "error"
+	// SyncResultRequeue means the sync succeeded and the CronJob was scheduled for its next run.
+	SyncResultRequeue = "requeue"
+	// SyncResultDone means the sync succeeded and the CronJob needs no further requeue.
+	SyncResultDone = "done"
 )
 
 var registerMetrics sync.Once
@@ -43,5 +65,6 @@ var registerMetrics sync.Once
 func Register() {
 	registerMetrics.Do(func() {
 		legacyregistry.MustRegister(CronJobCreationSkew)
+		legacyregistry.MustRegister(CronJobSyncTotal)
 	})
 }
